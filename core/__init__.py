@@ -9,10 +9,11 @@ from .executor import StreamingToolExecutor, ToolCall, ToolResult
 from .permissions import DualPermissionSystem, PermissionRule, PermissionAction
 from .features import FeatureGates
 from .agents import SubAgentSystem, AgentMode, SubAgent
-from .query import QueryEngine, QueryInternal, QueryConfig
+from .query import QueryEngine, QueryInternal, QueryConfig, BudgetTracker
 from .session import SessionManager, SessionState
-from .cache import PromptCache, CacheEntry
+from .cache import PromptCache
 from .deferred import DeferredLoadingSystem
+from .mcp import MCPClient, MCPTransport
 
 __all__ = [
     "TerminalBuffer",
@@ -30,9 +31,11 @@ __all__ = [
     "QueryEngine",
     "QueryInternal",
     "QueryConfig",
+    "BudgetTracker",
     "SessionManager",
     "SessionState",
     "PromptCache",
-    "CacheEntry",
     "DeferredLoadingSystem",
+    "MCPClient",
+    "MCPTransport",
 ]

@@ -2,6 +2,7 @@
 UltraCode - Sistema de Programación IA con Arquitectura Claude Code
 ================================================================
 Aplicación Streamlit con LangChain implementando los 12 pilares de la arquitectura.
+Compatible con Streamlit Cloud (sin threading/ThreadPoolExecutor).
 
 Autor: UltraCode System
 Versión: 1.0.0
@@ -13,13 +14,12 @@ import json
 import re
 import os
 import hashlib
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 import uuid
 
 # ============================================================
@@ -87,28 +87,26 @@ class TerminalLine:
 
 
 class TerminalBuffer:
-    """Buffer de terminal con soporte para streaming"""
+    """Buffer de terminal con soporte para streaming (Streamlit Cloud compatible)"""
 
     def __init__(self, max_lines: int = 500):
         self.lines: List[TerminalLine] = []
         self.max_lines = max_lines
-        self._lock = threading.Lock()
 
-    def add_line(self, content: str, line_type: str = "response", prefix: str = None):
-        with self._lock:
-            line = TerminalLine(content=content, type=line_type, prefix=prefix)
-            self.lines.append(line)
-            if len(self.lines) > self.max_lines:
-                self.lines.pop(0)
-            return line
+    def add_line(
+        self, content: str, line_type: str = "response", prefix: Optional[str] = None
+    ):
+        line = TerminalLine(content=content, type=line_type, prefix=prefix)
+        self.lines.append(line)
+        if len(self.lines) > self.max_lines:
+            self.lines.pop(0)
+        return line
 
     def get_lines(self) -> List[TerminalLine]:
-        with self._lock:
-            return self.lines.copy()
+        return list(self.lines)
 
     def clear(self):
-        with self._lock:
-            self.lines.clear()
+        self.lines.clear()
 
 
 # ------------------------------------------------
@@ -223,7 +221,9 @@ class Track2PermissionClassifier:
     def __init__(self):
         self.confidence_threshold = 0.7
 
-    async def evaluate(self, command: str, context: Dict = None) -> PermissionResult:
+    async def evaluate(
+        self, command: str, context: Optional[Dict] = None
+    ) -> PermissionResult:
         """Evalúa comando con comprensión semántica"""
         context = context or {}
 
@@ -269,7 +269,9 @@ class DualPermissionSystem:
         self.permission_history: List[PermissionResult] = []
         self.user_overrides: Dict[str, PermissionAction] = {}
 
-    async def check(self, command: str, context: Dict = None) -> PermissionResult:
+    async def check(
+        self, command: str, context: Optional[Dict] = None
+    ) -> PermissionResult:
         """Evalúa permisos en dos tracks"""
         # Track 1: Evaluación rápida determinista
         result = self.track1.evaluate(command)
@@ -344,15 +346,13 @@ class ToolDefinition:
 
 
 class StreamingToolExecutor:
-    """Ejecutor de herramientas con streaming y concurrencia"""
+    """Ejecutor de herramientas con streaming y concurrencia (Streamlit Cloud compatible)"""
 
     def __init__(self, permission_system: DualPermissionSystem):
         self.permission_system = permission_system
         self.registered_tools: Dict[str, ToolDefinition] = {}
         self.execution_buffer: Dict[str, ToolResult] = {}
-        self.executor = ThreadPoolExecutor(max_workers=10)
 
-        # Registrar herramientas built-in
         self._register_builtin_tools()
 
     def _register_builtin_tools(self):
@@ -441,7 +441,9 @@ class StreamingToolExecutor:
         """Registra una nueva herramienta"""
         self.registered_tools[tool.name] = tool
 
-    async def execute(self, tool_call: ToolCall, context: Dict = None) -> ToolResult:
+    async def execute(
+        self, tool_call: ToolCall, context: Optional[Dict] = None
+    ) -> ToolResult:
         """Ejecuta una herramienta individual"""
         start_time = time.time()
 
@@ -483,8 +485,8 @@ class StreamingToolExecutor:
             )
 
     async def execute_concurrent(
-        self, tool_calls: List[ToolCall], context: Dict = None
-    ) -> List[ToolResult]:
+        self, tool_calls: List[ToolCall], context: Optional[Dict] = None
+    ) -> List[Optional[ToolResult]]:
         """Ejecuta múltiples herramientas con concurrencia"""
 
         # Clasificar por isConcurrencySafe
@@ -497,29 +499,19 @@ class StreamingToolExecutor:
 
         results = []
 
-        # Ejecutar seguros en paralelo
-        futures = {
-            self.executor.submit(self._execute_async, tc, context): tc
-            for tc in safe_calls
-        }
+        if safe_calls:
+            tasks = [self.execute(tc, context) for tc in safe_calls]
+            safe_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in safe_results:
+                if isinstance(result, Exception):
+                    results.append(None)
+                else:
+                    results.append(result)
 
-        for future in as_completed(futures):
-            results.append(future.result())
-
-        # Ejecutar no-seguros secuencialmente
         for tc in unsafe_calls:
             results.append(await self.execute(tc, context))
 
         return results
-
-    def _execute_async(self, tool_call: ToolCall, context: Dict) -> ToolResult:
-        """Ejecuta de forma asíncrona (para ThreadPool)"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.execute(tool_call, context))
-        finally:
-            loop.close()
 
     def _get_tool_function(self, tool_name: str) -> Callable:
         """Obtiene función de herramienta"""
@@ -795,7 +787,7 @@ class QueryConfig:
 class QueryInternal:
     """Capa Interna - Obrero Especializado (query.ts)"""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = ""):
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
         self.base_url = "https://api.anthropic.com/v1"
 
@@ -831,7 +823,9 @@ class QueryEngine:
         self.permission_system = permission_system
         self.config = QueryConfig()
 
-    async def execute(self, prompt: str, tools: List[ToolCall] = None) -> Dict:
+    async def execute(
+        self, prompt: str, tools: Optional[List[ToolCall]] = None
+    ) -> Dict:
         """Ejecuta query con todas las verificaciones"""
         # Verificar presupuesto
         # (Implementar budget tracking)
@@ -879,7 +873,9 @@ class MCPClient:
         self.servers: Dict[str, MCPServer] = {}
         self.adapters: Dict[str, Any] = {}
 
-    def connect(self, name: str, transport: MCPTransport, endpoint: str = None):
+    def connect(
+        self, name: str, transport: MCPTransport, endpoint: Optional[str] = None
+    ):
         """Conecta a un servidor MCP"""
         server = MCPServer(
             name=name, transport=transport, status="connected", endpoint=endpoint
@@ -949,7 +945,7 @@ class SessionManager:
         self.current_session = session
         return session
 
-    def checkpoint(self) -> str:
+    def checkpoint(self) -> Optional[str]:
         """Guarda checkpoint de sesión"""
         if not self.current_session:
             return None

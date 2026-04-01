@@ -1,15 +1,14 @@
 """
 Executor Module - Streaming Tool Executor
-=======================================
+=========================================
 Implementación del pilar 4 - Ejecución concurrente de herramientas.
+Compatible con Streamlit Cloud (usa asyncio en lugar de threading).
 """
 
 import os
 import json
 import time
 import asyncio
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
 
@@ -73,11 +72,7 @@ class ToolExecutor:
 class StreamingToolExecutor(ToolExecutor):
     """
     Ejecutor de herramientas con streaming y concurrencia.
-
-    Implementa el patrón StreamingToolExecutor de Claude Code con:
-    - Ejecución concurrente de herramientas isConcurrencySafe
-    - Buffer ordenado para mantener coherencia
-    - Deferred loading de resultados
+    Compatible con Streamlit Cloud (usa asyncio en lugar de threading).
     """
 
     def __init__(self, permission_system=None, max_workers: int = 10):
@@ -85,9 +80,7 @@ class StreamingToolExecutor(ToolExecutor):
         self.permission_system = permission_system
         self.registered_tools: Dict[str, ToolDefinition] = {}
         self.execution_buffer: Dict[str, ToolResult] = {}
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._tool_functions: Dict[str, Callable] = {}
-        self._lock = threading.Lock()
         self._callbacks: List[Callable] = []
 
         self._register_builtin_tools()
@@ -216,7 +209,9 @@ class StreamingToolExecutor(ToolExecutor):
         """Agrega callback para eventos de ejecución"""
         self._callbacks.append(callback)
 
-    async def execute(self, tool_call: ToolCall, context: Dict = None) -> ToolResult:
+    async def execute(
+        self, tool_call: ToolCall, context: Optional[Dict[str, Any]] = None
+    ) -> ToolResult:
         """Ejecuta una herramienta individual"""
         start_time = time.time()
 
@@ -274,15 +269,12 @@ class StreamingToolExecutor(ToolExecutor):
             )
 
     async def execute_concurrent(
-        self, tool_calls: List[ToolCall], context: Dict = None
+        self, tool_calls: List[ToolCall], context: Optional[Dict[str, Any]] = None
     ) -> List[ToolResult]:
         """
-        Ejecuta múltiples herramientas con concurrencia.
-
-        Implementa Buffered Ordering: los resultados se almacenan
-        temporalmente y se liberan en el orden original solicitado.
+        Ejecuta múltiples herramientas con concurrencia usando asyncio.
+        Compatible con Streamlit Cloud.
         """
-        # Clasificar por isConcurrencySafe
         safe_calls = [
             tc for tc in tool_calls if tc.is_concurrency_safe and not tc.depends_on
         ]
@@ -290,44 +282,34 @@ class StreamingToolExecutor(ToolExecutor):
             tc for tc in tool_calls if not tc.is_concurrency_safe or tc.depends_on
         ]
 
-        results = []
-        result_order = {}  # tool_id -> result
+        results: List[Optional[ToolResult]] = []
+        result_order: Dict[str, ToolResult] = {}
 
-        # Ejecutar seguros en paralelo
-        futures = {
-            self.executor.submit(self._execute_async, tc, context): tc
-            for tc in safe_calls
-        }
+        if safe_calls:
+            tasks = [self.execute(tc, context) for tc in safe_calls]
+            safe_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for tc, result in zip(safe_calls, safe_results):
+                if isinstance(result, Exception):
+                    result_order[tc.id] = ToolResult(
+                        tool_id=tc.id, success=False, output=None, error=str(result)
+                    )
+                else:
+                    result_order[tc.id] = result
 
-        for future in as_completed(futures):
-            tool_call = futures[future]
-            try:
-                result = future.result()
-                result_order[result.tool_id] = result
-            except Exception as e:
-                result_order[tool_call.id] = ToolResult(
-                    tool_id=tool_call.id, success=False, output=None, error=str(e)
-                )
-
-        # Ejecutar no-seguros secuencialmente
         for tc in unsafe_calls:
             result = await self.execute(tc, context)
-            result_order[result.tool_id] = result
+            result_order[tc.id] = result
 
-        # Retornar en orden original
         for tc in tool_calls:
             results.append(result_order.get(tc.id))
 
         return results
 
-    def _execute_async(self, tool_call: ToolCall, context: Dict) -> ToolResult:
-        """Ejecuta de forma asíncrona para ThreadPool"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.execute(tool_call, context))
-        finally:
-            loop.close()
+    async def _execute_async(
+        self, tool_call: ToolCall, context: Optional[Dict[str, Any]]
+    ) -> ToolResult:
+        """Ejecuta de forma asíncrona"""
+        return await self.execute(tool_call, context)
 
     def _get_default_tool(self, name: str) -> Callable:
         """Obtiene función por defecto para herramienta"""

@@ -1,25 +1,27 @@
 """
 Terminal Buffer Module
-======================
+=====================
 Implementación del buffer de terminal con soporte para streaming.
+Compatible con Streamlit Cloud (sin threading).
 """
 
-import threading
+import asyncio
 from datetime import datetime
-from typing import List, Optional
-from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any, Callable
 
 
-@dataclass
 class TerminalLine:
     """Representación de una línea en la terminal"""
 
-    content: str
-    type: str = "response"  # response, command, success, error, warning, info
-    timestamp: datetime = field(default_factory=datetime.now)
-    prefix: Optional[str] = None
+    def __init__(
+        self, content: str, line_type: str = "response", prefix: Optional[str] = None
+    ):
+        self.content = content
+        self.type = line_type
+        self.timestamp = datetime.now()
+        self.prefix = prefix
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "content": self.content,
             "type": self.type,
@@ -34,34 +36,37 @@ class TerminalBuffer:
 
     Implementa el sistema de buffer similar al motor Ink/ de Claude Code,
     con soporte para múltiples tipos de líneas y streaming en tiempo real.
+    Compatible con Streamlit Cloud usando asyncio en lugar de threading.
     """
 
     def __init__(self, max_lines: int = 500):
         self.lines: List[TerminalLine] = []
         self.max_lines = max_lines
-        self._lock = threading.Lock()
-        self._callbacks: List[callable] = []
+        self._callbacks: List[Callable] = []
+        self._is_async = False
+        try:
+            loop = asyncio.get_event_loop()
+            self._is_async = loop.is_running()
+        except RuntimeError:
+            pass
 
     def add_line(
-        self, content: str, line_type: str = "response", prefix: str = None
+        self, content: str, line_type: str = "response", prefix: Optional[str] = None
     ) -> TerminalLine:
         """Agrega una nueva línea al buffer"""
-        with self._lock:
-            line = TerminalLine(content=content, type=line_type, prefix=prefix)
-            self.lines.append(line)
+        line = TerminalLine(content=content, line_type=line_type, prefix=prefix)
+        self.lines.append(line)
 
-            # Notificar callbacks
-            for callback in self._callbacks:
-                try:
-                    callback(line)
-                except:
-                    pass
+        for callback in self._callbacks:
+            try:
+                callback(line)
+            except Exception:
+                pass
 
-            # Mantener límite de líneas
-            if len(self.lines) > self.max_lines:
-                self.lines.pop(0)
+        if len(self.lines) > self.max_lines:
+            self.lines.pop(0)
 
-            return line
+        return line
 
     def add_lines(self, lines: List[str], line_type: str = "response"):
         """Agrega múltiples líneas"""
@@ -70,24 +75,23 @@ class TerminalBuffer:
 
     def get_lines(self) -> List[TerminalLine]:
         """Obtiene todas las líneas"""
-        with self._lock:
-            return self.lines.copy()
+        return list(self.lines)
 
     def get_last_lines(self, count: int) -> List[TerminalLine]:
         """Obtiene las últimas N líneas"""
-        with self._lock:
-            return self.lines[-count:] if count < len(self.lines) else self.lines.copy()
+        if count < len(self.lines):
+            return self.lines[-count:]
+        return list(self.lines)
 
     def clear(self):
         """Limpia el buffer"""
-        with self._lock:
-            self.lines.clear()
+        self.lines.clear()
 
-    def register_callback(self, callback: callable):
+    def register_callback(self, callback: Callable):
         """Registra un callback para nuevas líneas"""
         self._callbacks.append(callback)
 
-    def unregister_callback(self, callback: callable):
+    def unregister_callback(self, callback: Callable):
         """Elimina un callback"""
         if callback in self._callbacks:
             self._callbacks.remove(callback)
@@ -96,8 +100,7 @@ class TerminalBuffer:
         """Convierte el buffer a JSON"""
         import json
 
-        with self._lock:
-            return json.dumps([line.to_dict() for line in self.lines])
+        return json.dumps([line.to_dict() for line in self.lines])
 
     def __len__(self) -> int:
         return len(self.lines)

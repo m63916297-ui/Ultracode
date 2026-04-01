@@ -2,11 +2,11 @@
 Query Engine Module - Motor de Consultas de Dos Capas
 =====================================================
 Implementación del pilar 8 - Query Engine con separación de responsabilidades.
+Compatible con Streamlit Cloud.
 """
 
+import asyncio
 import os
-import time
-import hashlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, AsyncIterator
 
@@ -55,12 +55,12 @@ class QueryInternal:
     - Datos crudos
     """
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = ""):
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
         self.base_url = "https://api.anthropic.com/v1"
         self.streaming = True
 
-    async def format_request(self, request: QueryRequest) -> Dict:
+    async def format_request(self, request: QueryRequest) -> Dict[str, Any]:
         """Formatea request para API de Anthropic"""
         return {
             "model": request.config.model,
@@ -73,21 +73,20 @@ class QueryInternal:
             "stream": self.streaming,
         }
 
-    async def send_request(self, request_data: Dict) -> QueryResponse:
+    async def send_request(self, request_data: Dict[str, Any]) -> QueryResponse:
         """Envía request a API (simulado sin API key real)"""
+        model_name = request_data.get("model", "unknown")
         if not self.api_key:
             return QueryResponse(
-                content=f"[Simulación] Query preparado para modelo: {request_data.get('model')}\n[Requiere ANTHROPIC_API_KEY para ejecución real]",
-                model=request_data.get("model"),
+                content=f"[Simulación] Query preparado para modelo: {model_name}\n[Requiere ANTHROPIC_API_KEY para ejecución real]",
+                model=model_name,
                 usage={"input_tokens": 0, "output_tokens": 0, "cache_hits": 0},
                 cached=False,
             )
 
-        # En producción real, aquí se haría el request HTTP
-        # usando aiohttp o similar
         return QueryResponse(
             content="[Respuesta simulada]",
-            model=request_data.get("model"),
+            model=model_name,
             usage={"input_tokens": 0, "output_tokens": 0, "cache_hits": 0},
         )
 
@@ -126,7 +125,10 @@ class QueryEngine:
         self.retry_delay = 1.0
 
     async def execute(
-        self, prompt: str, tools: List[Dict] = None, context: Dict = None
+        self,
+        prompt: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> QueryResponse:
         """
         Ejecuta query con todas las verificaciones.
@@ -162,7 +164,7 @@ class QueryEngine:
 
         # 3. Formatear request
         request = QueryRequest(
-            prompt=prompt, config=self.config, tools=tools or [], metadata=context
+            prompt=prompt, config=self.config, tools=tools or [], metadata=context or {}
         )
         request_data = await self.internal.format_request(request)
 
@@ -185,7 +187,7 @@ class QueryEngine:
                     for tool_call in response.tool_calls:
                         result = await self.tool_executor.execute(tool_call)
                         tool_results.append(result)
-                    response.tool_results = tool_results
+                    response.tool_results = tool_results  # type: ignore
 
                 return response
 
@@ -199,8 +201,15 @@ class QueryEngine:
                         usage={},
                     )
 
+        return QueryResponse(
+            content="[Error] Fallo inesperado", model=self.config.model, usage={}
+        )
+
     async def stream(
-        self, prompt: str, tools: List[Dict] = None, context: Dict = None
+        self,
+        prompt: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
         """Ejecuta query con streaming de respuesta"""
         context = context or {}
@@ -210,7 +219,7 @@ class QueryEngine:
             return
 
         request = QueryRequest(
-            prompt=prompt, config=self.config, tools=tools or [], metadata=context
+            prompt=prompt, config=self.config, tools=tools or [], metadata=context or {}
         )
         request_data = await self.internal.format_request(request)
 
